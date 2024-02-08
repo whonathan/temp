@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+
+red() { printf '\e[31m%s\e[0m' "$1"; }
+blue() { printf '\e[34m%s\e[0m' "$1"; }
+green() { printf '\e[92m%s\e[0m' "$1"; }
+yellow() { printf '\e[93m%s\e[0m' "$1"; }
+
+function getvar {
+    local jokes=(
+        "Maybe your passwords need a little couples therapy."
+        "Even Darth Vader had better password hygiene than this."
+        "Caps lock got you again? Maybe try lowercase this time."
+        "Looks like your passwords are having an identity crisis."
+        "Don't match, maybe they're looking for some extra spark?"
+        "This might be the sign you need to upgrade your password game!"
+        "My apologies, even your pet goldfish could guess this password!"
+        "Looks like your love life isn't the only thing with match issues."
+        "Your passwords are like a bad dream, wish they would just disappear."
+        "Don't worry, I'm sure even a trained monkey could crack those passwords eventually."
+    )
+
+    while true; do
+        read -p "Enter $(red 'hostname'): " hostname
+        [ -z "$hostname" ] && continue
+        while true; do
+            read -p "Enter $(blue 'username'): " username
+            [ -z "$username" ] && continue
+            clear
+            while true; do
+                read -sp "Enter $(red 'root') password: " rootpass
+                echo
+                [ -z "$rootpass" ] && continue
+                while true; do
+                    read -sp "Re-enter $(red 'root') password: " rootpass2
+                    echo
+                    [ -z "$rootpass2" ] && continue
+                    if [ "$rootpass" = "$rootpass2" ]; then
+                    clear
+                        while true; do
+                            read -sp "Enter $(blue "$username") password: " userpass
+                            echo
+                            [ -z "$userpass" ] && continue
+                            while true; do
+                                read -sp "Re-enter $(blue "$username") password: " userpass2
+                                echo
+                                [ -z "$userpass2" ] && continue
+                                if [ "$userpass" = "$userpass2" ]; then
+                                    break 6
+                                else
+                                    yellow "${jokes[RANDOM %  ${#jokes[@]}]}"
+                                    echo; break
+                                fi
+                            done
+                        done
+                    else
+                        yellow "${jokes[RANDOM %  ${#jokes[@]}]}"
+                        echo; break
+                    fi
+                done
+            done
+        done
+    done
+    clear
+    while true; do
+        printf "Select $(red 'DISK') or $(red 'PARTITION') for installation: "
+        local options=('DISK' 'PARTITION')
+        menu "${options[@]}"; DP="${options[$?]}"
+        if [ "$DP" = 'DISK' ]; then
+            clear
+            printf "Select desired $(red 'DISK'):"
+            local options=($(lsblk -dpnoNAME | grep -oP "/dev/vd[a-z]+|/dev/sd[a-z]+|/dev/nvme[0-9]n[0-9]+"))
+            menu "${options[@]}"; DISK="${options[$?]}"
+            while true; do
+                read -p "This will delete all partition tables on $(red "$DISK"). Continue? [Y/n] " yn
+                echo
+                case $yn in
+                    [Yy]|'') break 2;;
+                    [Nn]   ) unset DISK; clear; continue 2;;
+                esac
+            done
+        elif [ "$DP" = 'PARTITION' ]; then
+            clear
+            printf "Select desired $(red 'ESP') partition:"
+            local options=($(lsblk -lpoNAME | grep -oP "/dev/vd[a-z][0-9]+|/dev/sd[a-z][0-9]+|/dev/nvme[0-9]n[0-9]p[0-9]+"))
+            menu "${options[@]}"; ESP="${options[$?]}"
+            echo
+            printf "Select desired $(red 'ROOT') partition:"
+            menu "${options[@]}"; ROOT="${options[$?]}"
+            while true; do
+                echo
+                printf "ESP : $(red "$ESP")"
+                echo
+                printf "ROOT: $(red "$ROOT")"
+                echo
+                read -p 'Are you sure about these partitions? [Y/n] ' yn
+                echo
+                case $yn in
+                    [Yy]|'') break 2 ;;
+                    [Nn]   ) unset ESP; unset ROOT; clear; continue 2 ;;
+                esac
+            done
+        fi
+    done
+    clear
+    while true; do
+        printf "Select desired $(red 'KERNEL'): "
+        local options=('linux' 'linux-lts' 'linux-zen' 'linux-hardened')
+        menu "${options[@]}"; KERNEL="${options[$?]}"
+        break
+    done
+}
+
+function diskpart {
+    clear
+    yellow "Setting up diskpart..."
+    echo
+
+    if [[ -n "$ESP" && -n "$ROOT" ]]; then
+        wipefs -af "$ESP" "$ROOT" &>/dev/null
+    elif [ -n "$DISK" ]; then
+        wipefs -af "$DISK" &>/dev/null
+        sgdisk -Zo "$DISK" &>/dev/null
+        sgdisk "$DISK" \
+            --new=1::+512M --typecode=1:ef00 --change-name=1:"ESP" \
+            --new=2::0 --typecode=2:8300 --change-name=2:"ROOT" &>/dev/null
+        sleep 2
+        ESP="/dev/disk/by-partlabel/ESP"
+        ROOT="/dev/disk/by-partlabel/ROOT"
+    fi
+
+    mkfs.fat -F32 "$ESP"  &>/dev/null
+    mkfs.btrfs -f "$ROOT" &>/dev/null
+
+    mount "$ROOT" /mnt
+
+    local sv=(log home cache machines portables snapshots)
+    local msv="mount -o defaults,noatime,subvol="
+
+    for csv in '' "${sv[@]}"; do
+        btrfs subvolume create /mnt/@"$csv" &>/dev/null
+    done
+
+    umount /mnt
+
+    ${msv}@				"$ROOT" /mnt
+    ${msv}@log		 -m "$ROOT" /mnt/var/log
+    ${msv}@home		 -m "$ROOT" /mnt/home
+    ${msv}@cache	 -m "$ROOT" /mnt/var/cache
+    ${msv}@machines	 -m "$ROOT" /mnt/var/lib/machines
+    ${msv}@portables -m "$ROOT" /mnt/var/lib/portables
+    ${msv}@snapshots -m "$ROOT" /mnt/.snapshots
+    mount			 -m "$ESP"  /mnt/boot
+}
+
+function base_install {
+    local country=$(curl -s http://ip-api.com/line?fields=country)
+    local pkg=(
+        base base-devel "$KERNEL" linux-firmware
+        efibootmgr inotify-tools grub-btrfs snapper zram-generator
+        networkmanager reflector openssh terminus-font
+        )
+
+    cpu=$(lscpu | awk '/Vendor/ {print $3}' | head -n 1)
+    case "$cpu" in
+        "AuthenticAMD") microcode="amd-ucode" ;;
+        "GenuineIntel") microcode="intel-ucode" ;;
+    esac
+    [ -n "$microcode" ] && pkg+=("$microcode")
+
+    virt=$(systemd-detect-virt)
+    case "$virt" in
+        "kvm")       hypervisor="qemu-guest-agent" ;;
+        "vmware")    hypervisor="open-vm-tools" ;;
+        "oracle")    hypervisor="virtualbox-guest-utils" ;;
+        "microsoft") hypervisor="hyperv" ;;
+    esac
+    [ -n "$hypervisor" ] && pkg+=("$hypervisor")
+
+    yellow "Setting up mirrorlist..."
+    echo
+
+    reflector -c "$country" -l 5 --sort rate --save /etc/pacman.d/mirrorlist &>/dev/null
+    sed -Ei 's/^#(Color)$/\1\nILoveCandy/;s/^#(ParallelDownloads).*/\1 = 10/' /etc/pacman.conf
+
+    pacman -Syy archlinux-keyring --noconfirm &>/dev/null
+    pacstrap /mnt "${pkg[@]}"
+
+    genfstab -U /mnt >>/mnt/etc/fstab
+    printf "[zram0]\nzram-size = ram / 2" >/mnt/etc/systemd/zram-generator.conf
+    cp -f /etc/pacman.conf /mnt/etc/pacman.conf
+    cp -f /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/mirrorlist
+}
+
+function setbase {
+    printf "$hostname" >/etc/hostname
+    useradd -mG wheel "$username"
+
+    printf "root:$rootpass" | chpasswd
+    printf "$username:$userpass" | chpasswd
+
+    printf "$username ALL=(ALL:ALL) NOPASSWD: ALL" >/etc/sudoers.d/"$username"
+
+    cat <<EOF >/etc/hosts
+127.0.0.1 localhost
+::1       localhost
+127.0.1.1 ${hostname}.localdomain "$hostname"
+EOF
+
+    local timezone=$(curl -s http://ip-api.com/line?fields=timezone)
+    ln -sf "/usr/share/zoneinfo/$timezone" /etc/localtime && hwclock --systohc
+    sed -i "/^#en_US.UTF-8/s/^#//" /etc/locale.gen && locale-gen
+
+    printf "LANG=en_US.UTF-8" >/etc/locale.conf
+    printf "KEYMAP=us\nFONT=ter-v22n" >/etc/vconsole.conf
+
+    grub-install \
+        --target=x86_64-efi \
+        --efi-directory=/boot \
+        --bootloader-id=GRUB
+
+    umount /.snapshots
+    rm -rf /.snapshots
+    snapper --no-dbus -c root create-config /
+    btrfs subvolume delete /.snapshots
+    mkdir /.snapshots
+    mount -a
+    chmod 750 /.snapshots
+
+    sed -Ei 's/^(ALLOW_GROUPS=).*/\1"wheel"/;s/^(SYNC_ACL=).*/\1"yes"/' /etc/snapper/configs/root
+    sed -Ei 's/^(TIMELINE_LIMIT_HOURLY=).*/\1"0"/'	/etc/snapper/configs/root
+    sed -Ei 's/^(TIMELINE_LIMIT_DAILY=).*/\1"7"/'	/etc/snapper/configs/root
+    sed -Ei 's/^(TIMELINE_LIMIT_WEEKLY=).*/\1"0"/'	/etc/snapper/configs/root
+    sed -Ei 's/^(TIMELINE_LIMIT_MONTHLY=).*/\1"0"/' /etc/snapper/configs/root
+    sed -Ei 's/^(TIMELINE_LIMIT_YEARLY=).*/\1"0"/'	/etc/snapper/configs/root
+
+    services=(
+        grub-btrfsd
+        NetworkManager
+        sshd
+        snapper-timeline.timer
+        snapper-cleanup.timer
+        reflector.timer
+        fstrim.timer
+    )
+
+    case "$virt" in
+        "kvm")       enable_hypervisor=(qemu-guest-agent) ;;
+        "vmware")    enable_hypervisor=(vmtoolsd vmware-vmblock-fuse) ;;
+        "oracle")    enable_hypervisor=(vboxservice) ;;
+        "microsoft") enable_hypervisor=(hv_fcopy_daemon hv_kvp_daemon hv_vss_daemon) ;;
+    esac
+
+    [ -n "$enable_hypervisor" ] && services+=("${enable_hypervisor[@]}")
+
+    for srv in "${services[@]}"; do
+        systemctl enable "$srv"
+    done
+
+    grub-mkconfig -o /boot/grub/grub.cfg
+}
+
+if ! grep 'arch.*iso' /proc/cmdline &>/dev/null; then
+    red "You are not running archiso! "
+    echo
+    exit 1
+fi
+
+clear
+. <(curl -s https://raw.githubusercontent.com/whonathan/bashmen/main/bashmen)
+
+umount -R /mnt &>/dev/null
+setfont ter-v22n &>/dev/null
+clear
+
+getvar && diskpart && base_install
+export hostname username rootpass userpass virt
+export -f setbase
+arch-chroot /mnt bash -c 'setbase'
