@@ -184,7 +184,7 @@ function setbase {
     cat <<EOF >/etc/hosts
 127.0.0.1 localhost
 ::1       localhost
-127.0.1.1 ${hostname}.localdomain "$hostname"
+127.0.1.1 ${hostname}.localdomain $hostname
 EOF
 
     local timezone=$(curl -s http://ip-api.com/line?fields=timezone)
