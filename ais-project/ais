@@ -105,7 +105,7 @@ function getvar {
     while true; do
         printf "Select desired $(red 'KERNEL'): "
         local options=('linux' 'linux-lts' 'linux-zen' 'linux-hardened')
-        menu "${options[@]}"; KERNEL="${options[$?]}"
+        menu "${options[@]}"; kernel="${options[$?]}"
         break
     done
 }
@@ -129,34 +129,17 @@ function diskpart {
     fi
 
     mkfs.fat -F32 "$ESP"  &>/dev/null
-    mkfs.btrfs -f "$ROOT" &>/dev/null
+    mkfs.xfs -f "$ROOT" &>/dev/null
 
     mount "$ROOT" /mnt
-
-    local sv=(log home cache machines portables snapshots)
-    local msv="mount -o defaults,noatime,subvol="
-
-    for csv in '' "${sv[@]}"; do
-        btrfs subvolume create /mnt/@"$csv" &>/dev/null
-    done
-
-    umount /mnt
-
-    ${msv}@				"$ROOT" /mnt
-    ${msv}@log		 -m "$ROOT" /mnt/var/log
-    ${msv}@home		 -m "$ROOT" /mnt/home
-    ${msv}@cache	 -m "$ROOT" /mnt/var/cache
-    ${msv}@machines	 -m "$ROOT" /mnt/var/lib/machines
-    ${msv}@portables -m "$ROOT" /mnt/var/lib/portables
-    ${msv}@snapshots -m "$ROOT" /mnt/.snapshots
-    mount			 -m "$ESP"  /mnt/boot
+    mount "$ESP" /mnt/boot -m
 }
 
 function base_install {
     local country=$(curl -s http://ip-api.com/line?fields=country)
     local pkg=(
-        base base-devel "$KERNEL" linux-firmware
-        efibootmgr inotify-tools grub-btrfs snapper zram-generator
+        base base-devel "$kernel" linux-firmware
+        efibootmgr grub xfsprogs zram-generator
         networkmanager reflector openssh terminus-font
         )
 
@@ -171,8 +154,6 @@ function base_install {
     case "$virt" in
         "kvm")       hypervisor="qemu-guest-agent" ;;
         "vmware")    hypervisor="open-vm-tools" ;;
-        "oracle")    hypervisor="virtualbox-guest-utils" ;;
-        "microsoft") hypervisor="hyperv" ;;
     esac
     [ -n "$hypervisor" ] && pkg+=("$hypervisor")
 
@@ -218,27 +199,9 @@ EOF
         --efi-directory=/boot \
         --bootloader-id=GRUB
 
-    umount /.snapshots
-    rm -rf /.snapshots
-    snapper --no-dbus -c root create-config /
-    btrfs subvolume delete /.snapshots
-    mkdir /.snapshots
-    mount -a
-    chmod 750 /.snapshots
-
-    sed -Ei 's/^(ALLOW_GROUPS=).*/\1"wheel"/;s/^(SYNC_ACL=).*/\1"yes"/' /etc/snapper/configs/root
-    sed -Ei 's/^(TIMELINE_LIMIT_HOURLY=).*/\1"0"/'	/etc/snapper/configs/root
-    sed -Ei 's/^(TIMELINE_LIMIT_DAILY=).*/\1"7"/'	/etc/snapper/configs/root
-    sed -Ei 's/^(TIMELINE_LIMIT_WEEKLY=).*/\1"0"/'	/etc/snapper/configs/root
-    sed -Ei 's/^(TIMELINE_LIMIT_MONTHLY=).*/\1"0"/' /etc/snapper/configs/root
-    sed -Ei 's/^(TIMELINE_LIMIT_YEARLY=).*/\1"0"/'	/etc/snapper/configs/root
-
     services=(
-        grub-btrfsd
         NetworkManager
         sshd
-        snapper-timeline.timer
-        snapper-cleanup.timer
         reflector.timer
         fstrim.timer
     )
@@ -246,8 +209,6 @@ EOF
     case "$virt" in
         "kvm")       enable_hypervisor=(qemu-guest-agent) ;;
         "vmware")    enable_hypervisor=(vmtoolsd vmware-vmblock-fuse) ;;
-        "oracle")    enable_hypervisor=(vboxservice) ;;
-        "microsoft") enable_hypervisor=(hv_fcopy_daemon hv_kvp_daemon hv_vss_daemon) ;;
     esac
 
     [ -n "$enable_hypervisor" ] && services+=("${enable_hypervisor[@]}")
@@ -256,6 +217,8 @@ EOF
         systemctl enable "$srv"
     done
 
+    sed -Ei 's/^(MODULES=).*/\1(xfs)/' /etc/mkinitcpio.conf
+    mkinitcpio -P "$kernel"
     grub-mkconfig -o /boot/grub/grub.cfg
 }
 
@@ -273,6 +236,6 @@ setfont ter-v22n &>/dev/null
 clear
 
 getvar && diskpart && base_install
-export hostname username rootpass userpass virt
+export hostname username rootpass userpass kernel virt
 export -f setbase
 arch-chroot /mnt bash -c 'setbase'
