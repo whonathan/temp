@@ -140,7 +140,8 @@ function base_install {
     local pkg=(
         base base-devel "$kernel" linux-firmware
         efibootmgr grub xfsprogs zram-generator
-        networkmanager reflector openssh terminus-font
+        networkmanager reflector openssh openssl
+        terminus-font
         )
 
     cpu=$(lscpu | awk '/Vendor/ {print $3}' | head -n 1)
@@ -218,7 +219,7 @@ EOF
     done
 
     sed -Ei 's/^(MODULES=).*/\1(xfs)/' /etc/mkinitcpio.conf
-    mkinitcpio -P "$kernel"
+    mkinitcpio -P
     grub-mkconfig -o /boot/grub/grub.cfg
 }
 
